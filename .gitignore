@@ -3,4 +3,11 @@ all_data
 records
 test
 train
+results
 used.zip
+embeddings_huge.py
+embeddings_large.py
+simlarity_large.py
+predict_large.py
+predict_huge.py
+main.py
