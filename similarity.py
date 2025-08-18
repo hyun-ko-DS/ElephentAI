@@ -46,10 +46,15 @@ plt.rcParams['axes.unicode_minus'] = False
 # ==================== 시스템 설정 ====================
 INPUT_DIR: str = "test"                     # 검색할 이미지가 있는 폴더 (test 폴더)
 USED_DIR: str = "train"                     # 비교 대상 이미지들이 있는 폴더 (train 폴더)
+
 FEATURES_NPY: str = "embeddings/train_features_large_patch14-336.npy"  # train 폴더 이미지들의 임베딩 벡터
 PATHS_NPY: str = "embeddings/train_paths_large_patch14-336.npy"        # train 폴더 이미지들의 파일 경로
+MODEL_NAME: str = 'openai/clip-vit-large-patch14-336' 
+
+
 PRODUCTS_CSV: str = "records/carbot_data_final.csv"     # 상품 정보 CSV 파일
-MODEL_NAME: str = 'openai/clip-vit-large-patch14-336'  # CLIP 모델명 (embeddings_train.py와 동일)
+
+
 TOPK: int = 5                              # 검색 결과 상위 개수
 
 # ==================== 동일품 판정 프롬프트 ====================
@@ -305,7 +310,12 @@ def visualize_search_results_with_query(query_image_path: str, results: List[Dic
     # 1번째 위치: 쿼리 이미지
     ax = axes[0] if total_images > 1 else axes
     ax.imshow(query_img)
-    ax.set_title('Input image', fontsize=14, fontweight='bold', color='blue')
+    
+    # 쿼리 이미지 경로에서 폴더명 추출
+    query_path_parts = query_image_path.replace('\\', '/').split('/')
+    query_folder_name = query_path_parts[-2] if len(query_path_parts) > 1 else "알 수 없음"
+    
+    ax.set_title(f'Input image\n{query_folder_name}', fontsize=14, fontweight='bold', color='blue')
     ax.axis('off')
     
     # 2번째 위치부터: 결과 이미지들
@@ -590,9 +600,20 @@ if __name__ == "__main__":
     check_gpu_memory()
     clear_gpu_memory()
     # 예시 검색 실행 (test 폴더의 이미지로 train 폴더 검색)
-    # search_by_image_name("thunder_0108.webp")  # test 폴더의 thunder 이미지
-    # search_by_image_name("헬로카봇_골드렉스/thunder_0109.webp")    # test 폴더의 thunder 이미지
-    search_by_image_name("헬로카봇_[한정판]_크리스탈카봇_스톰_X/thunder_0752.webp") 
+    
+    # search_by_image_name("헬로카봇_드릴버스트/thunder_0070.webp") # X
+    # search_by_image_name("헬로카봇_로드세이버/thunder_0074.webp") # O
+    # search_by_image_name("헬로카봇_아이누크/thunder_0689.webp") # O
+    # search_by_image_name("헬로카봇_골드렉스/thunder_0109.webp")    # O
+    # search_by_image_name("헬로카봇_[한정판]_크리스탈카봇_스톰_X/thunder_0752.webp") # X
+    # search_by_image_name("헬로카봇_이글하이더_변신로봇/thunder_0461.webp") # O
+    # search_by_image_name("헬로카봇_케이캅스/thunder_0018.webp") # O
+    # search_by_image_name("헬로카봇_펜타스톰_X/thunder_0842.webp") # O
+    # search_by_image_name("헬로카봇_하이퍼빌디언/thunder_0221.webp") # O
+    search_by_image_name("헬로카봇_스피너블/thunder_0150.webp") # X
+    # search_by_image_name("헬로카봇_슈퍼패트론/thunder_0490.webp") # O
+
+
     # get_search_results_only("thunder_1322.webp")  # test 폴더의 thunder 이미지
 
     clear_gpu_memory()
