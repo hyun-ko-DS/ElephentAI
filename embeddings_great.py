@@ -9,7 +9,7 @@
 입력 스펙:
 ---------
 1. IMAGE_DIR: "train" - 임베딩을 생성할 이미지들이 있는 폴더
-2. MODEL_NAME: 'open_clip/ViT-g-14' - 사용할 OpenCLIP 모델
+2. MODEL_NAME: 'ViT-g-14' - 사용할 OpenCLIP 모델
 3. BATCH_SIZE: 8 - 한 번에 처리할 이미지 개수 (GPU 메모리 효율성, g-14는 메모리 사용량이 큼)
 4. RECURSIVE_SCAN: True - 하위 폴더까지 스캔할지 여부
 5. ALLOWED_EXTS: {".jpg", ".jpeg", ".png", ".webp", ".bmp"} - 지원 이미지 확장자
@@ -21,7 +21,7 @@
 
 사용법:
 ------
-python embeddings_huge.py
+python embeddings_great.py
 
 주의사항:
 ---------
@@ -92,37 +92,11 @@ def list_images(root: str, recursive: bool = True) -> list[str]:
     paths.sort()
     return paths
 
-# def load_model(model_name: str, pretrained: str, device: torch.device) -> tuple[open_clip.CLIP, open_clip.transform.Transforms]:
-#     """
-#     OpenCLIP 모델과 전처리 변환을 로드합니다.
-    
-#     입력:
-#         model_name (str): OpenCLIP 모델명
-#         pretrained (str): 사전 훈련된 가중치명
-#         device (torch.device): GPU 또는 CPU 디바이스
-    
-#     출력:
-#         tuple[open_clip.CLIP, open_clip.transform.Transforms]: OpenCLIP 모델과 전처리 변환 객체
-    
-#     예시:
-#         >>> model, transforms = load_model("open_clip/ViT-g-14", "laion2b_s32b_b79k", torch.device("cuda"))
-#         >>> print(type(model))  # <class 'open_clip.model.CLIP'>
-#     """
-#     # 사전 훈련된 OpenCLIP 모델 로드
-#     model, _, transforms = open_clip.create_model_and_transforms(
-#         model_name, 
-#         pretrained=pretrained,
-#         device=device
-#     )
-    
-#     # 추론 모드로 설정 (드롭아웃, 배치 정규화 등 비활성화)
-#     model.eval()
-    
-#     return model, transforms
 
 def load_model(model_name: str, pretrained: str, device: torch.device) -> Tuple[torch.nn.Module, Callable]:
     """
     OpenCLIP 모델과 전처리 변환을 로드합니다.
+    FP16 (Half Precision)을 적용하여 메모리 사용량을 줄이고 속도를 향상시킵니다.
     """
     model, _, preprocess = open_clip.create_model_and_transforms(
         model_name,
@@ -130,14 +104,20 @@ def load_model(model_name: str, pretrained: str, device: torch.device) -> Tuple[
         device=device
     )
     model.eval()
+    
+    # FP16으로 변환하여 메모리 사용량 감소 및 속도 향상
+    if device.type == 'cuda':
+        model.half()
+        print("✅ FP16 (Half Precision) 적용 완료 - 메모리 사용량 50% 감소, 속도 향상")
+    
     return model, preprocess
 
-# def embed_batch(model: open_clip.CLIP, transforms_obj: open_clip.transform.Transforms, 
-#                 pil_images: list[Image.Image], device: torch.device) -> np.ndarray:
+
 def embed_batch(model: torch.nn.Module, transforms_obj: Callable, 
                 pil_images: list[Image.Image], device: torch.device) -> np.ndarray:
     """
     이미지 배치를 OpenCLIP 임베딩 벡터로 변환합니다.
+    FP16 최적화가 적용되어 있습니다.
     
     입력:
         model (open_clip.CLIP): 로드된 OpenCLIP 모델
@@ -156,7 +136,13 @@ def embed_batch(model: torch.nn.Module, transforms_obj: Callable,
     """
     with torch.no_grad():  # 그래디언트 계산 비활성화 (메모리 절약)
         # 이미지들을 OpenCLIP 모델 입력 형식으로 변환
-        inputs = torch.stack([transforms_obj(img) for img in pil_images]).to(device)
+        inputs = torch.stack([transforms_obj(img) for img in pil_images])
+        
+        # FP16으로 변환하여 메모리 사용량 감소
+        if device.type == 'cuda':
+            inputs = inputs.half()
+        
+        inputs = inputs.to(device)
         
         # OpenCLIP 모델로 이미지 특징 추출
         feats: torch.Tensor = model.encode_image(inputs)
@@ -164,8 +150,9 @@ def embed_batch(model: torch.nn.Module, transforms_obj: Callable,
         # L2 정규화 (코사인 유사도 계산을 위해)
         feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
     
+    # detach()를 추가하여 그래디언트 계산 그래프에서 분리, 메모리 사용량 감소
     # GPU에서 CPU로 이동하고 numpy 배열로 변환
-    return feats.cpu().numpy().astype("float32")
+    return feats.detach().cpu().numpy().astype("float32")
 
 def main() -> None:
     """

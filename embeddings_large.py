@@ -40,17 +40,17 @@ from transformers import CLIPProcessor, CLIPModel
 
 # ==================== 시스템 설정 ====================
 IMAGE_DIR: str = "train"                    # 임베딩을 생성할 이미지 폴더
-OUT_FEATURES: str = "embeddings/train_features_large_patch14-336.npy"  # 임베딩 벡터 저장 파일
-OUT_PATHS: str = "embeddings/train_paths_large_patch14-336.npy"        # 이미지 경로 저장 파일
+OUT_FEATURES: str = "embeddings/train_features_large_patch14.npy"  # 임베딩 벡터 저장 파일
+OUT_PATHS: str = "embeddings/train_paths_large_patch14.npy"        # 이미지 경로 저장 파일
 
 # CLIP 모델 선택 (주석 처리된 모델들도 사용 가능)
 # MODEL_NAME: str = "openai/clip-vit-base-patch32"      # 기본 모델 (512차원)
 # MODEL_NAME: str = 'openai/clip-vit-base-patch16'      # 기본 모델 (512차원)
-# MODEL_NAME: str = 'openai/clip-vit-large-patch14'      # 대형 모델 (768차원, 더 정확함)
-MODEL_NAME: str = 'openai/clip-vit-large-patch14-336' # 대형 모델 (768차원, 336x336 해상도)
+MODEL_NAME: str = 'openai/clip-vit-large-patch14'      # 대형 모델 (768차원, 더 정확함)
+# MODEL_NAME: str = 'openai/clip-vit-large-patch14-336' # 대형 모델 (768차원, 336x336 해상도)
 # MODEL_NAME: str = 'openai/clip-vit-huge-patch14-224' 
 
-BATCH_SIZE: int = 16                       # 배치 크기 (GPU 메모리에 따라 조정)
+BATCH_SIZE: int = 32                       # 배치 크기 (GPU 메모리에 따라 조정)
 RECURSIVE_SCAN: bool = True                # 하위 폴더까지 스캔할지 여부
 ALLOWED_EXTS: set = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}  # 지원 이미지 확장자
 

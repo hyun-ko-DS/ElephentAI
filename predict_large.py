@@ -16,14 +16,19 @@ from transformers import CLIPProcessor, CLIPModel
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
+# ======================= 전역 변수 (모델 사전 로드용) =======================
+global_model = None
+global_processor = None
+global_device = None
+
 # ======================= 사용자 설정 =======================
 # 테스트할 이미지 개수 제한 (None이면 모든 이미지 처리)
 MAX_TEST_IMAGES = None  # 예: 10으로 설정하면 처음 10개만 테스트
 
-FEATURES_NPY = "embeddings/train_features_large_patch14-336.npy"
-PATHS_NPY    = "embeddings/train_paths_large_patch14-336.npy"
-MODEL_NAME   = "openai/clip-vit-large-patch14-336"
-TOPK         = 5   # 유사도 검색 결과 개수
+FEATURES_NPY: str = "embeddings/train_features_large_patch14.npy"  # train 폴더 이미지들의 임베딩 벡터
+PATHS_NPY: str = "embeddings/train_paths_large_patch14.npy"        # train 폴더 이미지들의 파일 경로
+MODEL_NAME: str = 'openai/clip-vit-large-patch14' 
+TOPK         = 3   # 유사도 검색 결과 개수
 
 # test 폴더 경로
 TEST_DIR = "test"
@@ -36,51 +41,27 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 PLOT_DIR = os.path.join(RESULTS_DIR, MODEL_NAME.replace('/', '_').replace('-', '_'), "plot_result")
 os.makedirs(PLOT_DIR, exist_ok=True)
 
-# CSV에서 파일명→가격 매핑 (현재 사용되지 않음)
-# JOONGNA_CSV  = "records/carbot_data_final.csv"
-# FILENAME_COL = "thumbnail_filename"
-# PRICE_COL    = "price"
-# PRODUCT_COL  = "title"   # (선택: 없으면 자동 건너뜀)
 
-# NORMALIZE_FILENAMES = True
-# ==========================================================
+# ----------------------- CLIP 임베딩 (모델 사전 로드) -----------------------
+def initialize_model_once(model_name: str) -> Tuple[CLIPModel, CLIPProcessor]:
+    """
+    모델을 한 번만 로드하고 이후에는 재사용합니다.
+    전역 변수를 사용하여 메모리 효율성을 높입니다.
+    """
+    global global_model, global_processor, global_device
+    
+    if global_model is None:
+        print("🔧 모델을 한 번만 로드합니다...")
+        global_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"🖥️  Device: {global_device}")
+        
+        global_model, global_processor = load_model(model_name, global_device)
+        print("✅ 모델 로드 완료 (이제 재사용됩니다)")
+    else:
+        print("♻️  이미 로드된 모델을 재사용합니다")
+    
+    return global_model, global_processor
 
-# ----------------------- 유틸 (현재 사용되지 않음) -----------------------
-# def _parse_price_to_int(text: str) -> Optional[int]:
-#     if text is None: return None
-#     t = str(text).strip().replace(",", "").replace("원", "").replace("KRW", "")
-#     if not re.search(r"[0-9]", t): return None
-#     try:
-#         return int(float(t))
-#     except ValueError:
-#         digits = "".join(ch for ch in t if ch.isdigit())
-#         return int(digits) if digits else None
-# 
-# def _norm_name(path_or_name: str) -> str:
-#     name = os.path.basename(str(path_or_name)).strip()
-#     return name.lower() if NORMALIZE_FILENAMES else name
-# 
-# def load_meta_maps(csv_path, filename_col, price_col, product_col=None) -> Tuple[Dict[str,int], Optional[Dict[str,str]]]:
-#     if not os.path.isfile(csv_path):
-#         return {}, None
-#     encodings = ("utf-8-sig", "utf-8", "cp949")
-#     print(f"CSV에 '{filename_col}', '{price_col}' 컬럼이 필요. 현재: {fields}")
-#         price_map, title_map = {}, {}
-#         has_title = product_col in fields if product_col else False
-#         for row in reader:
-#             raw = row.get(filename_col, "")
-#             fname = _norm_name(raw)
-#             if not fname: continue
-#             price = _parse_price_to_int(row.get(price_col))
-#             if price is not None: price_map[fname] = price
-#             if has_title: title_map[fname] = str(row.get(product_col, "")).strip()
-#         return price_map, (title_map if has_title else None)
-#     except UnicodeDecodeError as e:
-#         last_err = e
-#         continue
-#     raise RuntimeError(f"CSV 인코딩 실패(시도: {encodings}) 원인: {last_err}")
-
-# ----------------------- CLIP 임베딩 -----------------------
 def load_model(model_name: str, device: torch.device):
     model = CLIPModel.from_pretrained(model_name).to(device)
     processor = CLIPProcessor.from_pretrained(model_name)
@@ -95,82 +76,8 @@ def embed_image(model, processor, img_path, device) -> np.ndarray:
         feat = feat / feat.norm(p=2, dim=-1, keepdim=True)
     return feat.cpu().numpy().astype("float32").flatten()
 
-# ----------------------- 이미지 → Base64 (현재 사용되지 않음) -----------------------
-# def _resize_to_jpeg_bytes(img: Image.Image, max_side=1024, enhance=False) -> bytes:
-#     w,h = img.size
-#     scale = min(1.0, max_side / max(w,h))
-#     if scale < 1.0: img = img.resize((int(w*scale), int(h*scale)), Image.Resampling.LANCZOS)
-#     if enhance:
-#         img = ImageEnhance.Contrast(img).enhance(1.3)
-#         img = ImageEnhance.Sharpness(img).enhance(1.6)
-#         img = ImageEnhance.Brightness(img).enhance(1.05)
-#     buf = io.BytesIO(); img.save(buf, format="JPEG", quality=92); return buf.getvalue()
-# 
-# def _path_to_b64(path: str, enhance=False) -> str:
-#     img = Image.open(path).convert("RGB")
-#     return base64.b64encode(_resize_to_jpeg_bytes(img, enhance=enhance)).decode("utf-8")
 
-# ----------------------- 동일품 판정 프롬프트 (현재 사용되지 않음) -----------------------
-# SAME_ITEM_PROMPT = """
-# You are a product matcher. For each CANDIDATE photo, decide if it is the SAME PRODUCT/MODEL as the QUERY photo.
-# Focus on brand/series/character, mold/shape, printed patterns, colorway, scale/size cues, accessories/parts, packaging text or set ID.
-# Do NOT be fooled by pose/angle/lighting. If unsure, answer false.
-# 
-# Return STRICT JSON ONLY, exactly this schema:
-# {"same": [true, true, true]}
-# 
-# Rules:
-# - The array order MUST match the order of the CANDIDATE blocks you receive.
-# - "same" means same model/edition (not just same category/character).
-# - Variant/limited/colorway/set-ID mismatch => false.
-# - STRICT JSON only. No extra text.
-# """
-
-# ----------------------- Claude 호출 래퍼 (현재 사용되지 않음) -----------------------
-# class SameItemJudgeClaude:
-#     def __init__(self, client: Anthropic):
-#         self.client = client
-# 
-#     def judge(self, query_path: str, candidates: List[dict]) -> List[bool]:
-#         contents = [{"type":"text","text": SAME_ITEM_PROMPT}]
-#         contents.append({"type":"text","text": f"QUERY: {os.path.basename(query_path)}"})
-#         f"QUERY: {os.path.basename(query_path)}"})
-#         contents.append({"type":"image","source":{
-#             "type":"base64","media_type":"image/jpeg","data": _path_to_b64(query_path)
-#         }})
-# 
-#         for c in candidates:
-#             meta_line = f"CANDIDATE rank={c['rank']} | file={c['filename']} | sim={c['sim']:.4f}"
-#             if c.get("title"): metaify(c['filename']} | sim={c['sim']:.4f}"
-#             if c.get("title"): meta_line += f" | title={c['title']}"
-#             contents.append({"type":"text","text": meta_line})
-#             contents.append({"type":"image","source":{
-#                 "type":"base64","media_type":"image/jpeg","data": _path_to_b64(c['resolved_path'])
-#             }})
-# 
-#         msg = self.client.messages.create(
-#             model=CLAUDE_MODEL,
-#             max_tokens=100,  # 출력이 매우 짧음
-#             temperature=0.1,
-#             system="Return STRICT JSON. No extra text.",
-#             messages=[{"role":"user","content": contents}]
-#         )
-# 
-#         raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
-#         if raw.startswith("```"):
-#             raw = raw.strip("`").replace("json","",1).strip()
-# 
-#         try:
-#             data = json.loads(raws):
-#             same = list(data.get("same", []))
-#             same = [bool(x) for x in same][:len(candidates)]
-#             if len(same) < len(candidates):
-#                 same += [False] * (len(candidates) - len(same))
-#         except Exception:
-#             same = [False] * len(candidates)
-#         return same
-
-# ----------------------- 유사도 검색 -----------------------
+# ----------------------- 유사도 검색 (모델 재사용) -----------------------
 def similar_search(query_img: str, feats_npy: str, paths_npy: str,
                    model_name: str, topk: int=6):
     if not os.path.isfile(query_img): raise FileNotFoundError(f"IMAGE_PATH not found: {query_img}")
@@ -181,10 +88,10 @@ def similar_search(query_img: str, feats_npy: str, paths_npy: str,
     paths = np.load(paths_npy, allow_pickle=True)
     if feats.ndim!=2 or feats.shape[0]!=len(paths): raise ValueError("features/paths 크기 불일치")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, processor = load_model(model_name, device)
+    # 모델을 한 번만 로드하고 재사용
+    model, processor = initialize_model_once(model_name)
 
-    q = embed_image(model, processor, query_img, device)
+    q = embed_image(model, processor, query_img, global_device)
     q = q / (np.linalg.norm(q)+1e-9)
     feats = feats / (np.linalg.norm(feats,axis=1,keepdims=True)+1e-9)
 
@@ -201,34 +108,6 @@ def similar_search(query_img: str, feats_npy: str, paths_npy: str,
             "sim": float(sims[i])
         })
     return entries
-
-# ----------------------- 경로 재해결 (현재 사용되지 않음) -----------------------
-# def resolve_to_base_dir(filename: str, base_dir: str) -> str:
-#     resolved = os.path.join(base_dir, os.path.basename(filename))
-#     if not os.path.isfile(resolved):
-#         raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {resolved}")
-#     return resolved
-# 
-# ----------------------- 가격 조회 유틸 (현재 사용되지 않음) -----------------------
-# def _try_extension_variants(fname: str, price_map: Dict[str,int]) -> Optional[int]:
-#     stem,_ = os.path.splitext(fname)
-#     if key in price_map: return price_map[key]
-#     return None
-# 
-# def lookup_price_for_filename(filename: str, price_map: Dict[str,int]) -> Optional[int]:
-#     key = _norm_name(filename)
-#     if key in price_map: return price_map[key]
-#     return _try_extension_variants(key, price_map)
-# 
-# ----------------------- 중앙값/평균 계산 (현재 사용되지 않음) -----------------------
-# def median_of(values: List[int]) -> Optional[float]:
-#     if not values: return None
-#     xs = sorted(values)
-#     n = len(xs)
-#     if n % 2 == 1:
-#         return float(xs[n//2])
-#     else:
-#         return (xs[n//2 - 1] + xs[n//2]) / 2.0
 
 # ----------------------- plot 생성 및 저장 -----------------------
 def create_and_save_plot(query_image_path: str, search_results: List[Dict], 
@@ -371,10 +250,15 @@ def run_automated_similarity_search():
     """
     test 폴더의 모든 이미지에 대해 자동으로 유사도 검색을 수행하고 결과를 CSV로 저장합니다.
     """
+    import time
+    
     print("🚀 자동화된 유사도 검색 시작")
     print(f"📁 테스트 폴더: {TEST_DIR}")
     print(f"🔍 최대 테스트 이미지: {MAX_TEST_IMAGES or '모든 이미지'}")
     print(f"📊 유사도 검색 결과 수: {TOPK}")
+    
+    # 전체 실행 시간 측정 시작
+    total_start_time = time.time()
     
     # 1. test 폴더 이미지 수집
     print("\n📂 test 폴더 이미지 수집 중...")
@@ -406,20 +290,21 @@ def run_automated_similarity_search():
         print(f"❌ 임베딩 파일 로드 실패: {e}")
         return
     
-    # 3. CLIP 모델 로드
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️  Device: {device}")
+    # 3. CLIP 모델 로드 (한 번만)
+    print(f"\n🔧 CLIP 모델 초기화 중...")
+    model_load_start = time.time()
     
     try:
-        print("🔧 CLIP 모델 로드 중...")
-        model, processor = load_model(MODEL_NAME, device)
-        print("✅ 모델 로드 완료")
+        model, processor = initialize_model_once(MODEL_NAME)
+        model_load_time = time.time() - model_load_start
+        print(f"✅ 모델 초기화 완료 (소요 시간: {model_load_time:.3f}초)")
     except Exception as e:
         print(f"❌ 모델 로드 실패: {e}")
         return
     
     # 4. 각 테스트 이미지에 대해 유사도 검색 수행
     results = []
+    search_start_time = time.time()
     print(f"\n🔍 {len(test_images)}개 이미지에 대해 유사도 검색 수행 중...")
     
     for i, (folder_name, filename) in enumerate(test_images, 1):
@@ -479,6 +364,8 @@ def run_automated_similarity_search():
                 'plot_path': ''
             })
     
+    search_time = time.time() - search_start_time
+    
     # 5. 결과를 CSV로 저장
     if results:
         # MODEL_NAME에서 파일명으로 사용할 부분 추출
@@ -497,6 +384,9 @@ def run_automated_similarity_search():
             print(f"\n✅ 결과 저장 완료: {csv_path}")
             print(f"📊 총 {len(results)}개 이미지 처리 완료")
             
+            # 전체 실행 시간 계산
+            total_time = time.time() - total_start_time
+            
             # 결과 요약 출력
             print(f"\n📋 결과 요약:")
             print(f"   - 테스트 폴더 수: {output_df['test_folder'].nunique()}")
@@ -506,28 +396,18 @@ def run_automated_similarity_search():
             print(f"   - plot 저장 경로: {PLOT_DIR}")
             print(f"   - CSV 저장 경로: {csv_path}")
             
+            # 시간 분석 출력
+            print(f"\n⏱️  시간 분석:")
+            print(f"   - 모델 초기화 시간: {model_load_time:.3f}초")
+            print(f"   - 검색 처리 시간: {search_time:.3f}초")
+            print(f"   - 총 소요 시간: {total_time:.3f}초")
+            print(f"   - 이미지당 평균 검색 시간: {search_time/len(test_images):.3f}초")
+            
         except Exception as e:
             print(f"❌ CSV 저장 실패: {e}")
     else:
         print("❌ 저장할 결과가 없습니다.")
 
-# ----------------------- 메인 파이프라인 (현재 사용되지 않음) -----------------------
-# def run_sameitem_price(image_path: str = None,
-#                        feats_npy: str = FEATURES_NPY,
-#                        paths_npy: str = PATHS_NPY,
-#                        csv_path: str = JOONGNA_CSV,
-#                        topk: int = TOPK,
-#                        base_dir: str = None):
-#     """
-#     기존 함수는 유지하되, 이미지 경로가 None이면 자동화된 검색을 수행합니다.
-#     """
-#     if image_path is None:
-#         # 자동화된 유사도 검색 수행
-#         run_automated_similarity_search()
-#         return
-#     
-#     # 기존 로직 (단일 이미지 처리)
-#     # ... 기존 코드 유지 ...
 
 if __name__ == "__main__":
     # 자동화된 유사도 검색 실행

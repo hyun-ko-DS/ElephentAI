@@ -38,6 +38,7 @@ warnings.filterwarnings('ignore')
 from PIL import Image
 import torch
 from transformers import CLIPProcessor, CLIPModel
+import time
 
 # 한글 폰트 설정 (Windows 환경)
 plt.rcParams['font.family'] = 'Malgun Gothic'
@@ -47,37 +48,21 @@ plt.rcParams['axes.unicode_minus'] = False
 INPUT_DIR: str = "test"                     # 검색할 이미지가 있는 폴더 (test 폴더)
 USED_DIR: str = "train"                     # 비교 대상 이미지들이 있는 폴더 (train 폴더)
 
-FEATURES_NPY: str = "embeddings/train_features_large_patch14-336.npy"  # train 폴더 이미지들의 임베딩 벡터
-PATHS_NPY: str = "embeddings/train_paths_large_patch14-336.npy"        # train 폴더 이미지들의 파일 경로
-MODEL_NAME: str = 'openai/clip-vit-large-patch14-336' 
-
+FEATURES_NPY: str = "embeddings/train_features_large_patch14.npy"  # train 폴더 이미지들의 임베딩 벡터
+PATHS_NPY: str = "embeddings/train_paths_large_patch14.npy"        # train 폴더 이미지들의 파일 경로
+MODEL_NAME: str = 'openai/clip-vit-large-patch14' 
 
 PRODUCTS_CSV: str = "records/carbot_data_final.csv"     # 상품 정보 CSV 파일
 
 
-TOPK: int = 5                              # 검색 결과 상위 개수
+TOPK: int = 3                              # 검색 결과 상위 개수
 
-# ==================== 동일품 판정 프롬프트 ====================
-SAME_ITEM_PROMPT: str = """
-You are a product matcher. For each CANDIDATE photo, decide if it is the SAME PRODUCT/MODEL as the QUERY photo.
-Focus on brand/series/character, mold/shape, printed patterns, colorway, scale/size cues, accessories/parts, packaging text or set ID.
-Do NOT be fooled by pose/angle/lighting. If unsure, answer false.
-
-Return STRICT JSON ONLY, exactly this schema:
-{"same": [true, true, true]}
-
-Rules:
-- The array order MUST match the order of the CANDIDATE blocks you receive.
-- "same" means same model/edition (not just same category/character).
-- Variant/limited/colorway/set-ID mismatch => false.
-- STRICT JSON only. No extra text.
-"""
 
 # ==================== 핵심 함수들 ====================
-
 def load_model(model_name: str, device: torch.device) -> Tuple[CLIPModel, CLIPProcessor]:
     """
     CLIP 모델과 프로세서를 로드합니다.
+    FP16 (Half Precision)을 적용하여 메모리 사용량을 줄이고 속도를 향상시킵니다.
     
     입력:
         model_name (str): CLIP 모델명 (예: 'openai/clip-vit-large-patch14')
@@ -89,11 +74,18 @@ def load_model(model_name: str, device: torch.device) -> Tuple[CLIPModel, CLIPPr
     model = CLIPModel.from_pretrained(model_name).to(device)
     processor = CLIPProcessor.from_pretrained(model_name)
     model.eval()
+    
+    # FP16으로 변환하여 메모리 사용량 감소 및 속도 향상
+    if device.type == 'cuda':
+        model.half()
+        print("✅ FP16 (Half Precision) 적용 완료 - 메모리 사용량 50% 감소, 속도 향상")
+    
     return model, processor
 
 def embed_image(model: CLIPModel, processor: CLIPProcessor, img_path: str, device: torch.device) -> np.ndarray:
     """
     이미지의 CLIP 임베딩 벡터를 계산합니다.
+    FP16 최적화가 적용되어 있습니다.
     
     입력:
         model (CLIPModel): CLIP 모델 객체
@@ -108,10 +100,19 @@ def embed_image(model: CLIPModel, processor: CLIPProcessor, img_path: str, devic
     """
     image = Image.open(img_path).convert("RGB")
     with torch.no_grad():
-        inputs = processor(images=image, return_tensors="pt").to(device)
+        inputs = processor(images=image, return_tensors="pt")
+        
+        # FP16으로 변환하여 메모리 사용량 감소
+        if device.type == 'cuda':
+            inputs = {k: v.half() if torch.is_tensor(v) else v for k, v in inputs.items()}
+        
+        inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+        
         feat = model.get_image_features(**inputs)
         feat = feat / feat.norm(p=2, dim=-1, keepdim=True)  # L2 정규화
-    return feat.cpu().numpy().astype("float32").flatten()
+    
+    # detach()를 추가하여 그래디언트 계산 그래프에서 분리, 메모리 사용량 감소
+    return feat.detach().cpu().numpy().astype("float32").flatten()
 
 def list_input_images() -> List[str]:
     """
@@ -210,7 +211,7 @@ def get_product_info_from_path(image_path: str, products_dict: Dict[str, Dict[st
 
 def search_similar_images(query_image_path: str, features: np.ndarray, paths: np.ndarray, 
                          model: CLIPModel, processor: CLIPProcessor, device: torch.device, 
-                         top_k: int = 5) -> List[Dict[str, Union[int, float, str]]]:
+                         top_k: int = 5) -> Tuple[List[Dict[str, Union[int, float, str]]], float, float]:
     """
     이미지 유사도 검색을 수행합니다.
     
@@ -224,12 +225,15 @@ def search_similar_images(query_image_path: str, features: np.ndarray, paths: np
         top_k (int): 반환할 상위 결과 개수
     
     출력:
-        List[Dict[str, Union[int, float, str]]]: 검색 결과 딕셔너리 리스트
+        Tuple[List[Dict[str, Union[int, float, str]]], float, float]: 
+            (검색 결과 딕셔너리 리스트, 임베딩 생성 시간, 유사도 계산 시간)
             [{'rank': 1, 'path': '경로', 'similarity': 0.8, 'filename': '파일명'}, ...]
     """
     try:
-        # 쿼리 이미지 임베딩 계산
+        # 쿼리 이미지 임베딩 계산 시간 측정
+        embedding_start = time.time()
         q: np.ndarray = embed_image(model, processor, query_image_path, device)
+        embedding_time = time.time() - embedding_start
         
         # 차원 확인 및 조정
         query_dim = q.shape[0]
@@ -240,7 +244,10 @@ def search_similar_images(query_image_path: str, features: np.ndarray, paths: np
         if query_dim != features_dim:
             print(f"⚠️  차원 불일치 감지! 쿼리: {query_dim}차원, 저장된 임베딩: {features_dim}차원")
             print("   저장된 임베딩과 동일한 모델을 사용해야 합니다.")
-            return []
+            return [], embedding_time, 0.0
+        
+        # 유사도 계산 시간 측정
+        similarity_start = time.time()
         
         # 코사인 유사도 계산을 위한 정규화
         q = q / (np.linalg.norm(q) + 1e-9)
@@ -260,11 +267,13 @@ def search_similar_images(query_image_path: str, features: np.ndarray, paths: np
                 'filename': os.path.basename(str(paths[i]))
             })
         
-        return results
+        similarity_time = time.time() - similarity_start
+        
+        return results, embedding_time, similarity_time
         
     except Exception as e:
         print(f"❌ 검색 중 오류 발생: {e}")
-        return []
+        return [], 0.0, 0.0
 
 def visualize_search_results_with_query(query_image_path: str, results: List[Dict[str, Union[int, float, str]]], 
                                       products_dict: Dict[str, Any], figsize: Tuple[int, int] = (20, 8)) -> None:
@@ -374,7 +383,7 @@ def visualize_search_results_with_query(query_image_path: str, results: List[Dic
         print(f"    🔗 링크: {price_info['retail_link']}")
         print("-" * 80)
 
-def search_by_image_name(image_name: str, return_results: bool = False) -> Optional[List[Dict[str, Union[int, float, str]]]]:
+def search_by_image_name(image_name: str, return_results: bool = False) -> Optional[Union[List[Dict[str, Union[int, float, str]]], Tuple[List[Dict[str, Union[int, float, str]]], float, float]]]:
     """
     이미지명을 입력받아 유사도 검색을 수행하고 결과를 시각화합니다.
     
@@ -383,16 +392,17 @@ def search_by_image_name(image_name: str, return_results: bool = False) -> Optio
         return_results (bool): True면 결과 반환, False면 시각화만
     
     출력:
-        Optional[List[Dict[str, Union[int, float, str]]]]: return_results=True일 때 검색 결과 리스트, False일 때 None
+        Optional[Union[List[Dict[str, Union[int, float, str]]], Tuple[List[Dict[str, Union[int, float, str]]], float, float]]]: 
+            return_results=True일 때 (검색 결과, 임베딩 시간, 검색 시간), False일 때 None
     """
     
-    print(f" 검색 시작: {image_name}")
+    print(f"🔍 검색 시작: {image_name}")
     
     # 입력 이미지 경로 확인
     query_image_path: str = os.path.join(INPUT_DIR, image_name)
     if not os.path.isfile(query_image_path):
         print(f"❌ 이미지를 찾을 수 없습니다: {query_image_path}")
-        print(f"\n {INPUT_DIR} 폴더의 사용 가능한 이미지들:")
+        print(f"\n📁 {INPUT_DIR} 폴더의 사용 가능한 이미지들:")
         input_images: List[str] = list_input_images()
         for i, img in enumerate(input_images[:20], 1):
             print(f"  {i:2d}. {img}")
@@ -429,19 +439,21 @@ def search_by_image_name(image_name: str, return_results: bool = False) -> Optio
     print(f"🖥️  Device: {device}")
     
     try:
-        print(" CLIP 모델 로드 중...")
+        print("🔧 CLIP 모델 로드 중...")
         model, processor = load_model(MODEL_NAME, device)
         print("✅ 모델 로드 완료")
     except Exception as e:
         print(f"❌ 모델 로드 실패: {e}")
         return None
     
-    # 유사도 검색 수행
-    print(f" '{image_name}' 이미지로 유사도 검색 중... (상위 {TOPK}개 결과)")
-    results: List[Dict[str, Union[int, float, str]]] = search_similar_images(query_image_path, feats, paths, model, processor, device, TOPK)
+    # 임베딩 생성 및 검색 수행
+    print(f"🔍 '{image_name}' 이미지로 유사도 검색 중... (상위 {TOPK}개 결과)")
+    results, embedding_time, similarity_time = search_similar_images(query_image_path, feats, paths, model, processor, device, TOPK)
     
     if results:
         print(f"✅ 검색 완료: {len(results)}개 결과 발견")
+        print(f"⏱️  임베딩 생성 시간: {embedding_time:.3f}초")
+        print(f"⏱️  유사도 계산 시간: {similarity_time:.3f}초")
         
         # 가격 정보를 결과에 추가
         for result in results:
@@ -471,8 +483,8 @@ def search_by_image_name(image_name: str, return_results: bool = False) -> Optio
                 print(f"    🔗 링크: {price_info['retail_link']}")
                 print("-" * 80)
             
-            print(f"\n 결과를 리턴합니다. (총 {len(results)}개)")
-            return results
+            print(f"\n📋 결과를 리턴합니다. (총 {len(results)}개)")
+            return results, embedding_time, similarity_time
         else:
             # 새로운 시각화 방식 사용 (쿼리 이미지 + 결과 이미지들)
             visualize_search_results_with_query(query_image_path, results, products_dict)
@@ -599,21 +611,36 @@ def check_gpu_memory() -> Tuple[float, float, float]:
 if __name__ == "__main__":
     check_gpu_memory()
     clear_gpu_memory()
+    
     # 예시 검색 실행 (test 폴더의 이미지로 train 폴더 검색)
+    t0 = time.time()
     
     # search_by_image_name("헬로카봇_드릴버스트/thunder_0070.webp") # X
     # search_by_image_name("헬로카봇_로드세이버/thunder_0074.webp") # O
     # search_by_image_name("헬로카봇_아이누크/thunder_0689.webp") # O
     # search_by_image_name("헬로카봇_골드렉스/thunder_0109.webp")    # O
-    # search_by_image_name("헬로카봇_[한정판]_크리스탈카봇_스톰_X/thunder_0752.webp") # X
+    search_by_image_name("헬로카봇_[한정판]_크리스탈카봇_스톰_X/thunder_0752.webp") # X
     # search_by_image_name("헬로카봇_이글하이더_변신로봇/thunder_0461.webp") # O
     # search_by_image_name("헬로카봇_케이캅스/thunder_0018.webp") # O
     # search_by_image_name("헬로카봇_펜타스톰_X/thunder_0842.webp") # O
     # search_by_image_name("헬로카봇_하이퍼빌디언/thunder_0221.webp") # O
-    search_by_image_name("헬로카봇_스피너블/thunder_0150.webp") # X
+    # result = search_by_image_name("헬로카봇_스피너블/thunder_0150.webp", return_results=True) # X
     # search_by_image_name("헬로카봇_슈퍼패트론/thunder_0490.webp") # O
 
-
     # get_search_results_only("thunder_1322.webp")  # test 폴더의 thunder 이미지
-
+    
+    total_time = time.time() - t0
+    
+    if result and isinstance(result, tuple) and len(result) == 3:
+        results, embedding_time, similarity_time = result
+        print("=" * 80)
+        print("⏱️  시간 분석:")
+        print(f"   임베딩 생성 시간: {embedding_time:.3f}초")
+        print(f"   유사도 계산 시간: {similarity_time:.3f}초")
+        print(f"   기타 처리 시간: {total_time - embedding_time - similarity_time:.3f}초")
+        print(f"   총 소요 시간: {total_time:.3f}초")
+        print("=" * 80)
+    else:
+        print(f"총 소요 시간: {total_time:.3f}초")
+    
     clear_gpu_memory()

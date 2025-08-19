@@ -34,6 +34,7 @@ import gc
 import warnings
 from typing import List, Dict, Tuple, Optional, Union, Any, Callable
 warnings.filterwarnings('ignore')
+import time
 
 from PIL import Image
 import torch
@@ -53,45 +54,31 @@ MODEL_NAME: str = 'ViT-g-14'     # OpenCLIP 모델명
 
 PRODUCTS_CSV: str = "records/carbot_data_final.csv"     # 상품 정보 CSV 파일
 
-TOPK: int = 5                              # 검색 결과 상위 개수
-
-# ==================== 핵심 함수들 ====================
-
-# def load_model(model_name: str, device: torch.device) -> Tuple[open_clip.CLIP, open_clip.transform.Transforms]:
-#     """
-#     OpenCLIP 모델과 전처리 변환을 로드합니다.
-    
-#     입력:
-#         model_name (str): OpenCLIP 모델명 (예: 'open_clip/ViT-g-14')
-#         device (torch.device): GPU 또는 CPU 디바이스
-    
-#     출력:
-#         Tuple[open_clip.CLIP, open_clip.transform.Transforms]: OpenCLIP 모델과 전처리 변환 객체
-#     """
-#     # OpenCLIP 모델 로드
-#     model, _, transforms = open_clip.create_model_and_transforms(
-#         model_name, 
-#         pretrained='laion2b_s32b_b79k',
-#         device=device
-#     )
-#     model.eval()
-#     return model, transforms
+TOPK: int = 1                              # 검색 결과 상위 개수
 
 def load_model(model_name: str, device: torch.device) -> Tuple[open_clip.CLIP, Callable]:
     """
     OpenCLIP 모델과 전처리 함수를 로드합니다.
+    FP16 (Half Precision)을 적용하여 메모리 사용량을 줄이고 속도를 향상시킵니다.
     """
     model, _, preprocess = open_clip.create_model_and_transforms(
         model_name,
-        pretrained="laion2b_s34b_b88k" ,
+        pretrained="laion2b_s34b_b88k",
         device=device
     )
     model.eval()
+    
+    # FP16으로 변환하여 메모리 사용량 감소 및 속도 향상
+    if device.type == 'cuda':
+        model.half()
+        print("✅ FP16 (Half Precision) 적용 완료 - 메모리 사용량 50% 감소, 속도 향상")
+    
     return model, preprocess
 
 def embed_image(model: open_clip.CLIP, transforms_obj: Callable, img_path: str, device: torch.device) -> np.ndarray:
     """
     이미지의 OpenCLIP 임베딩 벡터를 계산합니다.
+    FP16 최적화가 적용되어 있습니다.
     """
     from PIL import Image
     import torch
@@ -99,10 +86,17 @@ def embed_image(model: open_clip.CLIP, transforms_obj: Callable, img_path: str, 
 
     image = Image.open(img_path).convert("RGB")
     with torch.no_grad():
-        inputs = transforms_obj(image).unsqueeze(0).to(device)
+        # FP16으로 변환하여 메모리 사용량 감소
+        inputs = transforms_obj(image).unsqueeze(0)
+        if device.type == 'cuda':
+            inputs = inputs.half()
+        inputs = inputs.to(device)
+        
         feat = model.encode_image(inputs)
         feat = feat / feat.norm(p=2, dim=-1, keepdim=True)
-    return feat.cpu().numpy().astype("float32").flatten()
+    
+    # detach()를 추가하여 그래디언트 계산 그래프에서 분리, 메모리 사용량 감소
+    return feat.detach().cpu().numpy().astype("float32").flatten()
 
 def list_input_images() -> List[str]:
     """
@@ -239,6 +233,7 @@ def search_similar_images(query_image_path: str, features: np.ndarray, paths: np
         
         # 유사도 계산 (정규화된 벡터의 내적 = 코사인 유사도)
         sims: np.ndarray = features_norm @ q
+        # sims = np.dot(features_norm, q) 
         top_idx: np.ndarray = np.argsort(sims)[::-1][:top_k]  # 유사도 내림차순 정렬
         
         # 결과 생성
@@ -365,16 +360,17 @@ def visualize_search_results_with_query(query_image_path: str, results: List[Dic
         print(f"    🔗 링크: {price_info['retail_link']}")
         print("-" * 80)
 
-def search_by_image_name(image_name: str, return_results: bool = False) -> Optional[List[Dict[str, Union[int, float, str]]]]:
+def search_by_image_name(image_name: str, return_results: bool = False) -> Optional[Union[List[Dict[str, Union[int, float, str]]], Dict[str, Union[str, int]]]]:
     """
     이미지명을 입력받아 유사도 검색을 수행하고 결과를 시각화합니다.
     
     입력:
         image_name (str): 검색할 이미지 파일명
-        return_results (bool): True면 결과 반환, False면 시각화만
+        return_results (bool): True면 top1 결과를 JSON 형태로 반환, False면 시각화만
     
     출력:
-        Optional[List[Dict[str, Union[int, float, str]]]]: return_results=True일 때 검색 결과 리스트, False일 때 None
+        Optional[Union[List[Dict[str, Union[int, float, str]]], Dict[str, Union[str, int]]]]: 
+            return_results=True일 때 top1 결과 JSON, False일 때 None
     """
     
     print(f"🔍 검색 시작: {image_name}")
@@ -440,31 +436,33 @@ def search_by_image_name(image_name: str, return_results: bool = False) -> Optio
             result['price'] = get_product_info_from_path(str(result['path']), products_dict)['retail_price']
         
         if return_results:
-            # 결과만 리턴 (시각화 제외)
-            print(f"\n📊 검색 결과 요약 (상위 {len(results)}개)")
-            print("=" * 100)
-            for result in results:
-                price_info: Dict[str, Any] = get_product_info_from_path(str(result['path']), products_dict)
-                
-                # 경로에서 폴더명과 파일명 추출
-                path_parts = str(result['path']).replace('\\', '/').split('/')
-                folder_name = path_parts[-2] if len(path_parts) > 1 else "알 수 없음"
-                filename = result['filename']
-                
-                # 가격 정보 포맷팅
-                retail_price = price_info['retail_price'] if price_info['retail_price'] != '가격 정보 없음' else 'N/A'
-                used_price = price_info['used_price_avg'] if price_info['used_price_avg'] != '중고가 정보 없음' else 'N/A'
-                
-                print(f"{result['rank']:2d}. {filename}")
-                print(f"    📁 폴더: {folder_name}")
-                print(f"    💰 정가: {retail_price}")
-                print(f"    💰 중고가: {used_price}")
-                print(f"    📍 유사도: {result['similarity']:.4f}")
-                print(f"    🔗 링크: {price_info['retail_link']}")
-                print("-" * 80)
+            # top1 결과만 JSON 형태로 리턴
+            top1_result = results[0]  # 가장 유사한 이미지 (rank=1)
+            price_info: Dict[str, Any] = get_product_info_from_path(str(top1_result['path']), products_dict)
             
-            print(f"\n📋 결과를 리턴합니다. (총 {len(results)}개)")
-            return results
+            # 경로에서 폴더명 추출
+            path_parts = str(top1_result['path']).replace('\\', '/').split('/')
+            folder_name = path_parts[-2] if len(path_parts) > 1 else "알 수 없음"
+            
+            # JSON 형태로 top1 결과 구성
+            top1_json = {
+                "similar_toy_name": folder_name,
+                "similar_image_path": str(top1_result['path']),
+                "similar_retail_price": price_info['retail_price'] if price_info['retail_price'] != '가격 정보 없음' else 0,
+                "similar_used_price": price_info['used_price_avg'] if price_info['used_price_avg'] != '중고가 정보 없음' else 0
+            }
+            
+            print(f"\n📊 Top1 검색 결과 (JSON 형태):")
+            print("=" * 100)
+            print(f"similar_toy_name: {top1_json['similar_toy_name']}")
+            print(f"similar_image_path: {top1_json['similar_image_path']}")
+            print(f"similar_retail_price: {int(top1_json['similar_retail_price'])}")
+            print(f"similar_used_price: {int(top1_json['similar_used_price'])}")
+            print(f"유사도: {top1_result['similarity']:.4f}")
+            print("=" * 100)
+            
+            print(f"\n📋 Top1 결과를 JSON 형태로 리턴합니다.")
+            return top1_json
         else:
             # 새로운 시각화 방식 사용 (쿼리 이미지 + 결과 이미지들)
             visualize_search_results_with_query(query_image_path, results, products_dict)
@@ -475,7 +473,7 @@ def search_by_image_name(image_name: str, return_results: bool = False) -> Optio
 
 # ==================== 유틸리티 함수들 ====================
 
-def get_search_results_only(image_name: str) -> Optional[List[Dict[str, Union[int, float, str]]]]:
+def get_search_results_only(image_name: str) -> Optional[Dict[str, Union[str, int]]]:
     """
     이미지 검색 결과만 반환하는 함수 (시각화 제외)
     
@@ -483,19 +481,19 @@ def get_search_results_only(image_name: str) -> Optional[List[Dict[str, Union[in
         image_name (str): 검색할 이미지 파일명
     
     출력:
-        Optional[List[Dict[str, Union[int, float, str]]]]: 검색 결과 리스트 또는 None
+        Optional[Dict[str, Union[str, int]]]: top1 검색 결과 JSON 또는 None
     """
     print(f"🔍 {image_name} 검색 시작 (결과만 반환)")
     return search_by_image_name(image_name, return_results=True)
 
-def test_search() -> Optional[List[Dict[str, Union[int, float, str]]]]:
+def test_search() -> Optional[Dict[str, Union[str, int]]]:
     """
     검색 기능을 테스트합니다.
     
     입력: 없음
     
     출력:
-        Optional[List[Dict[str, Union[int, float, str]]]]: 테스트 결과 또는 None
+        Optional[Dict[str, Union[str, int]]]: 테스트 결과 JSON 또는 None
     """
     print("🧪 검색 기능 테스트 시작")
     
@@ -512,10 +510,10 @@ def test_search() -> Optional[List[Dict[str, Union[int, float, str]]]]:
     print(f"🔍 테스트 이미지: {test_image}")
     
     # 검색 실행
-    results: Optional[List[Dict[str, Union[int, float, str]]]] = get_search_results_only(test_image)
+    results: Optional[Dict[str, Union[str, int]]] = get_search_results_only(test_image)
     
     if results:
-        print(f"✅ 테스트 성공! {len(results)}개 결과 반환")
+        print(f"✅ 테스트 성공! Top1 결과 JSON 반환")
         return results
     else:
         print("❌ 테스트 실패")
@@ -593,6 +591,7 @@ if __name__ == "__main__":
     clear_gpu_memory()
     
     # 예시 검색 실행 (test 폴더의 이미지로 train 폴더 검색)
+    t0 = time.time()
     print("🚀 OpenCLIP ViT-g-14 모델을 사용한 이미지 유사도 검색 시작")
     print(f"📁 검색 대상: {INPUT_DIR} 폴더")
     print(f"📊 비교 대상: {USED_DIR} 폴더 (OpenCLIP 임베딩)")
@@ -600,16 +599,12 @@ if __name__ == "__main__":
     print(f"📏 임베딩 차원: 1024차원")
     print("=" * 80)
     
-    # search_by_image_name("헬로카봇_드릴버스트/thunder_0070.webp") # X
-    # search_by_image_name("헬로카봇_로드세이버/thunder_0074.webp") # O
-    # search_by_image_name("헬로카봇_아이누크/thunder_0689.webp") # O
-    # search_by_image_name("헬로카봇_골드렉스/thunder_0109.webp")    # O
-    # search_by_image_name("헬로카봇_[한정판]_크리스탈카봇_스톰_X/thunder_0752.webp") # X
-    # search_by_image_name("헬로카봇_이글하이더_변신로봇/thunder_0461.webp") # O
-    # search_by_image_name("헬로카봇_케이캅스/thunder_0018.webp") # O
-    # search_by_image_name("헬로카봇_펜타스톰_X/thunder_0842.webp") # O
-    # search_by_image_name("헬로카봇_하이퍼빌디언/thunder_0221.webp") # O
-    search_by_image_name("헬로카봇_스피너블/thunder_0150.webp") # X
-    # search_by_image_name("헬로카봇_슈퍼패트론/thunder_0490.webp") # O
-
+    # 에이전트에 넘겨줄 리턴값값
+    result = search_by_image_name("헬로카봇_스피너블/thunder_0150.webp", return_results=True)
+    print("=" * 80)
+    print("🔍 검색 결과 JSON:")
+    print(result)
+    print("=" * 80)
+    print(f"총 소요 시간: {time.time() - t0 :.2f}초")
     clear_gpu_memory()
+    exit()

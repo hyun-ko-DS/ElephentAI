@@ -48,6 +48,11 @@ warnings.filterwarnings('ignore')
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
+# ======================= 전역 변수 (모델 사전 로드용) =======================
+global_model = None
+global_transforms = None
+global_device = None
+
 # ==================== 시스템 설정 ====================
 TEST_DIR: str = "test"                           # 테스트 이미지가 있는 폴더
 RESULTS_DIR: str = "results"                     # 결과 저장 폴더
@@ -60,6 +65,25 @@ TOPK: int = 3                                    # 검색 결과 상위 개수
 MAX_TEST_IMAGES: Optional[int] = None            # 처리할 최대 테스트 이미지 수 (None이면 모든 이미지)
 
 # ==================== 핵심 함수들 ====================
+
+def initialize_model_once(model_name: str) -> Tuple[open_clip.CLIP, Callable]:
+    """
+    모델을 한 번만 로드하고 이후에는 재사용합니다.
+    전역 변수를 사용하여 메모리 효율성을 높입니다.
+    """
+    global global_model, global_transforms, global_device
+    
+    if global_model is None:
+        print("🔧 모델을 한 번만 로드합니다...")
+        global_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"🖥️  Device: {global_device}")
+        
+        global_model, global_transforms = load_model(model_name, global_device)
+        print("✅ 모델 로드 완료 (이제 재사용됩니다)")
+    else:
+        print("♻️  이미 로드된 모델을 재사용합니다")
+    
+    return global_model, global_transforms
 
 def load_model(model_name: str, device: torch.device) -> Tuple[open_clip.CLIP, Callable]:
     """
@@ -200,7 +224,7 @@ def similar_search(query_image_path: str, features: np.ndarray, paths: np.ndarra
         return results
         
     except Exception as e:
-        print(f"❌ 검색 중 오류 발생: {e}")
+        print(f"❌ 유사도 검색 중 오류 발생: {e}")
         return []
 
 def create_and_save_plot(query_image_path: str, search_results: List[Dict[str, Union[int, float, str]]], 
@@ -294,11 +318,16 @@ def run_automated_similarity_search() -> None:
     """
     전체 test 데이터셋에 대해 자동화된 유사도 검색을 수행합니다.
     """
+    import time
+    
     print("🚀 자동화된 유사도 검색 시작")
     print(f"📁 테스트 폴더: {TEST_DIR}")
     print(f"🔍 최대 테스트 이미지: {MAX_TEST_IMAGES if MAX_TEST_IMAGES else '모든 이미지'}")
     print(f"📊 유사도 검색 결과 수: {TOPK}")
     print("=" * 80)
+    
+    # 전체 실행 시간 측정 시작
+    total_start_time = time.time()
     
     # 1. test 폴더 이미지 수집
     print("📂 test 폴더 이미지 수집 중...")
@@ -329,21 +358,22 @@ def run_automated_similarity_search() -> None:
         print("   python embeddings_huge.py를 먼저 실행하세요.")
         return
     
-    # 3. 모델 로드
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️  Device: {device}")
+    # 3. 모델 로드 (한 번만)
+    print(f"\n🔧 OpenCLIP 모델 초기화 중...")
+    model_load_start = time.time()
     
     try:
-        print("🔧 OpenCLIP 모델 로드 중...")
         print(f"   모델: {MODEL_NAME}")
-        model, transforms = load_model(MODEL_NAME, device)
-        print("✅ 모델 로드 완료")
+        model, transforms = initialize_model_once(MODEL_NAME)
+        model_load_time = time.time() - model_load_start
+        print(f"✅ 모델 초기화 완료 (소요 시간: {model_load_time:.3f}초)")
     except Exception as e:
         print(f"❌ 모델 로드 실패: {e}")
         return
     
     # 4. 각 테스트 이미지에 대해 유사도 검색 수행
-    print(f"🔍 {len(test_images)}개 이미지에 대해 유사도 검색 수행 중...")
+    search_start_time = time.time()
+    print(f"\n🔍 {len(test_images)}개 이미지에 대해 유사도 검색 수행 중...")
     
     results: List[Dict[str, str]] = []
     
@@ -355,7 +385,7 @@ def run_automated_similarity_search() -> None:
         
         try:
             # 유사도 검색 수행
-            search_results = similar_search(full_path, feats, paths, model, transforms, device, TOPK)
+            search_results = similar_search(full_path, feats, paths, model, transforms, global_device, TOPK)
             
             if search_results:
                 # 가장 유사한 이미지 정보 추출
@@ -400,6 +430,8 @@ def run_automated_similarity_search() -> None:
                 'plot_path': ''
             })
     
+    search_time = time.time() - search_start_time
+    
     # 5. 결과를 CSV 파일로 저장
     print("\n📊 결과 저장 중...")
     
@@ -419,12 +451,22 @@ def run_automated_similarity_search() -> None:
     # 출력용 DataFrame (플롯 경로 제외)
     output_df = df[['test_folder', 'test_filename', 'top_similar_predict', 'similarity_score']].copy()
     
+    # 전체 실행 시간 계산
+    total_time = time.time() - total_start_time
+    
     print(f"✅ 결과 저장 완료: {csv_path}")
     print(f"📊 총 {len(output_df)}개 이미지 처리 완료")
     print(f"   - 성공: {len(output_df[output_df['top_similar_predict'] != '검색 실패'])}")
     print(f"   - 실패: {len(output_df[output_df['top_similar_predict'] == '검색 실패'])}")
     print(f"   - plot 생성 완료: {len(df[df['plot_path'] != ''])}")
     print(f"   - plot 저장 경로: {PLOT_DIR}")
+    
+    # 시간 분석 출력
+    print(f"\n⏱️  시간 분석:")
+    print(f"   - 모델 초기화 시간: {model_load_time:.3f}초")
+    print(f"   - 검색 처리 시간: {search_time:.3f}초")
+    print(f"   - 총 소요 시간: {total_time:.3f}초")
+    print(f"   - 이미지당 평균 검색 시간: {search_time/len(test_images):.3f}초")
     
     # 상위 10개 결과 미리보기
     print(f"\n📋 상위 10개 결과 미리보기:")

@@ -5,9 +5,12 @@ test
 train
 results
 used.zip
+embeddings_great.py
 embeddings_huge.py
 embeddings_large.py
 simlarity_large.py
+similarity_great.py
 predict_large.py
 predict_huge.py
+predict_great.py
 main.py
