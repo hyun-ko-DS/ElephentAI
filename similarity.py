@@ -157,18 +157,83 @@ def load_products_info() -> Dict[str, Dict[str, Any]]:
         print(f"❌ 상품 정보 로드 실패: {e}")
         return {}
 
+# def get_product_info_from_path(image_path: str, products_dict: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+#     """
+#     이미지 경로에서 폴더명을 추출하여 해당 상품의 정보를 반환합니다.
+    
+#     입력:
+#         image_path (str): 이미지 파일 경로
+#         products_dict (Dict[str, Dict[str, Any]]): 상품 정보 딕셔너리
+    
+#     출력:
+#         Dict[str, Any]: 상품 정보 또는 기본값
+#     """
+#     # 경로에서 폴더명 추출 (마지막 폴더명이 상품명)
+#     path_parts = image_path.replace('\\', '/').split('/')
+#     folder_name = path_parts[-2] if len(path_parts) > 1 else ""
+    
+#     # 폴더명에서 상품명 추출 (헬로카봇_ 접두사 제거)
+#     if folder_name.startswith("헬로카봇_"):
+#         product_name = folder_name[6:]  # "헬로카봇_" 제거
+#     else:
+#         product_name = folder_name
+    
+#     # 정확한 매칭 시도
+#     if product_name in products_dict:
+#         return products_dict[product_name]
+    
+#     # 부분 매칭 시도 (폴더명이 상품명의 일부인 경우)
+#     for key, info in products_dict.items():
+#         if product_name in key or key in product_name:
+#             return info
+    
+#     # 매칭되지 않는 경우 기본값 반환
+#     return {
+#         'retail_price': '가격 정보 없음',
+#         'used_price_avg': '중고가 정보 없음',
+#         'retail_link': '링크 없음'
+#     }
+
+# def get_product_info_from_path(image_path: str, products_dict: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+#     # 경로에서 폴더명 추출
+#     path_parts = image_path.replace('\\', '/').split('/')
+#     folder_name = path_parts[-2] if len(path_parts) > 1 else ""
+    
+#     # 폴더명에서 상품명 추출 (헬로카봇_ 접두사 제거)
+#     if folder_name.startswith("헬로카봇_"):
+#         product_name = folder_name[6:]  # "헬로카봇_" 제거
+#     else:
+#         product_name = folder_name
+    
+#     # 1단계: 정확한 매칭 시도
+#     exact_match_key = f"헬로카봇 {product_name}"
+#     if exact_match_key in products_dict:
+#         return products_dict[exact_match_key]
+    
+#     # 2단계: 부분 매칭 시도 (더 정확한 매칭 우선)
+#     best_match = None
+#     best_score = 0
+    
+#     for key, info in products_dict.items():
+#         if product_name in key:
+#             # 더 정확한 매칭 점수 계산
+#             score = len(product_name) / len(key)
+#             if score > best_score:
+#                 best_score = score
+#                 best_match = (key, info)
+    
+#     if best_match:
+#         return best_match[1]
+    
+#     # 3단계: 매칭되지 않는 경우 기본값 반환
+#     return {
+#         'retail_price': '가격 정보 없음',
+#         'used_price_avg': '중고가 정보 없음',
+#         'retail_link': '링크 없음'
+#     }
+
 def get_product_info_from_path(image_path: str, products_dict: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    이미지 경로에서 폴더명을 추출하여 해당 상품의 정보를 반환합니다.
-    
-    입력:
-        image_path (str): 이미지 파일 경로
-        products_dict (Dict[str, Dict[str, Any]]): 상품 정보 딕셔너리
-    
-    출력:
-        Dict[str, Any]: 상품 정보 또는 기본값
-    """
-    # 경로에서 폴더명 추출 (마지막 폴더명이 상품명)
+    # 경로에서 폴더명 추출
     path_parts = image_path.replace('\\', '/').split('/')
     folder_name = path_parts[-2] if len(path_parts) > 1 else ""
     
@@ -178,16 +243,33 @@ def get_product_info_from_path(image_path: str, products_dict: Dict[str, Dict[st
     else:
         product_name = folder_name
     
-    # 정확한 매칭 시도
-    if product_name in products_dict:
-        return products_dict[product_name]
+    # 언더스코어를 공백으로 변환하여 CSV 키와 매칭
+    product_name_clean = product_name.replace('_', ' ')
     
-    # 부분 매칭 시도 (폴더명이 상품명의 일부인 경우)
+    # 1단계: 정확한 매칭 시도 (언더스코어를 공백으로 변환 후)
+    exact_match_key = f"헬로카봇 {product_name_clean}"
+    if exact_match_key in products_dict:
+        return products_dict[exact_match_key]
+    
+    # 2단계: 원본 폴더명으로도 시도
+    if folder_name in products_dict:
+        return products_dict[folder_name]
+    
+    # 3단계: 부분 매칭 시도
+    best_match = None
+    best_score = 0
+    
     for key, info in products_dict.items():
-        if product_name in key or key in product_name:
-            return info
+        if product_name_clean in key or product_name in key:
+            score = len(product_name_clean) / len(key)
+            if score > best_score:
+                best_score = score
+                best_match = (key, info)
     
-    # 매칭되지 않는 경우 기본값 반환
+    if best_match:
+        return best_match[1]
+    
+    # 4단계: 매칭되지 않는 경우 기본값 반환
     return {
         'retail_price': '가격 정보 없음',
         'used_price_avg': '중고가 정보 없음',
@@ -613,7 +695,13 @@ if __name__ == "__main__":
     print("=" * 80)
     
     # 에이전트에 넘겨줄 리턴값
-    result = search_by_image_name("헬로카봇_스피너블/thunder_0150.webp", return_results=True)
+    
+    # result = search_by_image_name("헬로카봇_이글하이더_변신로봇/thunder_0461.webp", return_results=True)
+    # result = search_by_image_name("헬로카봇_마이티가드/thunder_0734.webp", return_results=True)
+    # result = search_by_image_name("헬로카봇_앵그리퍼프/thunder_mentor_angrypuff.jpg", return_results=True)
+    # result = search_by_image_name("헬로카봇_킹가이즈X/thunder_mentor_kinguyz_x.jpg", return_results=True)
+    result = search_by_image_name("헬로카봇_펜타스톰_X/thunder_mentor_pentastorm_x.jpg", return_results=True)
+
     print("=" * 80)
     print("🔍 검색 결과 JSON:")
     print(result)
